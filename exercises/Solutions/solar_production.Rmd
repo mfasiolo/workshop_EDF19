@@ -45,34 +45,12 @@ fitQ <- qgamV(logprod ~ dow + te(Posan, Instant, bs = c("cc", "cc"), k = c(5, 5)
 
 plotRGL( sm(fitQ, 1), residuals = TRUE )
 ```
-The `rgl` plot shows a clear pattern in the residuals sign along `Instant`. We can have a better look using `l_gridCheck2D`:
+The `rgl` plot shows a clear pattern in the residuals sign along `Instant`. 
+
+
+3) We can have a look at corresponding pinball loss using `l_gridCheck2D`:
 ```{r dbbmi3, message = F}
-check2D(fitQ, "Posan", "Instant") + l_gridCheck2D(function(.x) mean(.x<0), stand = F)
-```
-
-3) We increase the number of basis functions along `Instant` and refit:
-```{r dbbmi4, message = F}
-fitQ2 <- qgamV(logprod ~ dow + te(Posan, Instant, bs = c("cc", "cc"), k = c(5, 15)),
-                data=DataTRAIN, qu = 0.5)
-
-check2D(fitQ2, "Posan", "Instant") + l_gridCheck2D(function(.x) sum(.x<0)/length(.x))
-
-AIC(fitQ, fitQ2)
-```
-Residual sign less evident, and AIC much improved!
-
-4) Fit multiple quantiles:
-```{r dbbmi5, message = F}
-qus = seq(0.1, 0.9, length.out = 5)
-fitMQ <- mqgamV(logprod ~ dow + te(Posan, Instant, bs = c("cc", "cc"), k = c(5, 15)),
-                 data=DataTRAIN, qus)
-```
-
-Predict from median model, and plot the pinball loss vs `Instant`:
-```{r dbbmi6, message = F}
-prQ05 <- predict(fitMQ[[3]], newdata = DataTEST)
-
-pinloss <- function(y, mu, qu){
+pinball <- function(y, mu, qu){ # mu is fitted quantile, qu is quantile of interest
   tau <- 1 - qu
   d <- y - mu
   l <- d * 0
@@ -81,101 +59,170 @@ pinloss <- function(y, mu, qu){
   return( l )
 }
 
-tmp <- pinloss(DataTEST$logprod, prQ05, 0.5)
-plot(DataTEST$Instant, tmp, ylab = "pinball loss")
+check2D(fitQ, "Posan", "Instant", type = "y", 
+        trans = function(x, ...) pinball(x, fitQ$fitted.values, qu = 0.5)) + 
+        l_gridCheck2D(mean, stand = F) + 
+  l_rug() + ylab("Pinball loss")
 ```
-We get large losses near to sunrise and sunset, possibly because solar production surges or collapses very suddenly at those times: 
+
+4) We increase the number of basis functions along `Instant` and refit:
+```{r dbbmi4, message = F}
+fitQ2 <- qgamV(logprod ~ dow + te(Posan, Instant, bs = c("cc", "cc"), k = c(5, 15)),
+                data=DataTRAIN, qu = 0.5)
+
+check2D(fitQ2, "Posan", "Instant", type = "y", 
+        trans = function(x, ...) pinball(x, fitQ2$fitted.values, qu = 0.5)) + 
+        l_gridCheck2D(mean, stand = F) + 
+  l_rug() + ylab("Pinball loss")
+
+AIC(fitQ, fitQ2)
+```
+Pinball loss seems more uniform across `Posan` and `Instant`, and AIC much improved! We can perform a further check using `l_gridQCheck2D`:
+```{r dbbmi4b, message = F}
+check2D(fitQ2, "Posan", "Instant") + l_gridQCheck2D()
+```
+`l_gridQCheck2D` does not show any pattern, hence we suspect that the pattern still visible in the pinball loss plot above might be due to the variance of the residuals being not constant across `Posan` and `Instant`.
+
+
+5) Fit multiple quantiles:
+```{r dbbmi5, message = F}
+qus = seq(0.1, 0.9, length.out = 5)
+fitMQ <- mqgamV(logprod ~ dow + te(Posan, Instant, bs = c("cc", "cc"), k = c(5, 15)),
+                 data=DataTRAIN, qus)
+```
+
+Use test set on median model, and plot the pinball loss vs `Instant` and `Posan`:
+```{r dbbmi6, message = F}
+fit50 <- getViz(fitMQ[[3]], newdata = DataTEST)
+
+pl <- check1D(fit50, list("Instant", "Posan"), type = "y", 
+              trans = function(x, ...) pinball(x, predict(fit50, newdata = DataTEST), qu = 0.5)) + 
+  geom_smooth() + 
+  l_gridCheck1D(gridFun = mean, level = 0) + 
+  l_rug() + ylab("Pinball loss")
+
+print(pl, pages = 1)
+```
+The plot across `Instant` shows large losses near to sunrise and sunset, possibly because solar production surges or collapses very suddenly at those times: 
 ```{r dbbmi7, message = F}
 plot(solar_prod$Instant[1:200], solar_prod$logprod[1:200])
 ```
 
-5) Fit Gaulss GAM and plot tensor effect on variance:
+Similarly, the second plot shows that higher losses as `Posan`$\approx$ 0.25 and 0.75, probably because the hours of daylight at changes at the fastest rather during those periods. 
+
+6) Fit Gaulss GAM and plot tensor effect on variance:
 ```{r dbbmi8, message = F}
 fitLSS <- gamV(list(logprod ~ dow + te(Posan, Instant, bs= c("cc", "cc"), k = c(5, 15)),
                             ~ dow + te(Posan, Instant, bs= c("cc", "cc"), k = c(5, 5))), 
-               family = gaulss, data=DataTRAIN, aViz = list(nsim = 50))
+               family = gaulss, 
+               data=DataTRAIN)
 
 plot(fitLSS, select = 2)
 ```
 There are four spikes in the variance effect. These are probably attributable to the fact that the production surge (collapse) at sunrise (sunset) is difficult to capture with a non-adaptive smooth effect. Futher the time of day at which sunrise happens changes at the fastest rate around the equinoxes, hence it makes sense having higher variance around `Posan = 0.25` and `Posan = 0.75`.
 
-6) We fit a standard Gaussian GAM:
+7) We fit a standard Gaussian GAM:
 ```{r dbbmi9, message = F}
-fitGAUS <- gamV(logprod ~ te(Posan, Instant, bs= c("cc", "cc"), k = c(5, 15)), data=solar_prod)
+fitGAUS <- gamV(logprod ~ te(Posan, Instant, bs= c("cc", "cc"), k = c(5, 15)), 
+                data = DataTRAIN)
 ```
-Then we produce predictions for each quantile and model: 
+Then we check the pinball losses along one of the two covariates, for each quantile and model: 
 ```{r dbbmi10, message = F}
-prQv <- sapply(1:5, # QGAM
-               function(.ii){
-                 predict(fitMQ[[.ii]], newdata = DataTEST)
-               })
-
-prGAUSv <- sapply(1:5, # GAUSSIAN GAM
+compareMod <- function(QGAM, GAUS, GAULSS, dat, variab){
+  
+  nq <- length(QGAM)
+  qus <- as.numeric(names(QGAM))
+  
+  pinQv <- lapply(1:nq, # QGAM
                   function(.ii){
-                    qnorm(qus[.ii], predict(fitGAUS, newdata = DataTEST), sqrt(fitGAUS$sig2))
+                    tmp <- getViz(QGAM[[.ii]], newdata = dat) 
+                    check1D(tmp, variab, type = "y", 
+                            trans = function(x, ...) 
+                              pinball(x, predict(tmp, newdata = dat), qu = qus[.ii]))
                   })
-
-prLSSv <- sapply(1:5, # GAULSS
-                 function(.ii){
-                   tmp <- predict(fitLSS, newdata = DataTEST, type = "response")
-                   qnorm(qus[.ii], tmp[ , 1], 1/tmp[ , 2])
-                 })
-```
-
-We calculate the pinball loss corresponding to each quantile and method, and we plot them:
-```{r dbbmi11, message = F}
-pinlossvett <- function(y, mu, p){
-  n <- length( p )
-  out <- sapply(1:n,
-                function(ii){
-                  return( sum(pinloss(y, mu[ , ii], p[ii])) )
-                })
-  return( out )
+  
+  pinGAUSv <- lapply(1:nq, # GAUSSIAN GAM
+                     function(.ii){
+                       tmp <- getViz(GAUS, newdata = dat) 
+                       check1D(tmp, variab, type = "y", 
+                               trans = function(x, ...) 
+                                 pinball(x, 
+                                         qnorm(qus[.ii], predict(tmp, newdata = dat), sqrt(fitGAUS$sig2)), 
+                                         qu = qus[.ii]))
+                     })
+  
+  pinLSSv <- lapply(1:nq, # GAULSS
+                    function(.ii){
+                      tmp <- getViz(GAULSS, newdata = dat) 
+                      check1D(tmp, variab, type = "y", 
+                              trans = function(x, ...){
+                                .pred <- predict(tmp, newdata = dat, type = "response")
+                                pinball(x, qnorm(qus[.ii], .pred[ , 1], 1 / .pred[ , 2]), qu = qus[.ii])
+                              }) 
+                    })
+  
+  plts <- list()
+  for(ind in 1:nq){
+    plDat <- as.data.frame(rbind(pinQv[[ind]]$data$res, pinGAUSv[[ind]]$data$res, pinLSSv[[ind]]$data$res))
+    plDat$plotID <- as.factor(rep(c("QGAM", "GAU", "GAULSS"), each = nrow(plDat)/3))
+    
+    plts[[ind]] <- ggplot(data = plDat,
+                          mapping = aes(x = x, y = y, group = plotID, col = plotID, fill = plotID)) + 
+      geom_smooth(se = FALSE) + theme_bw() + ggtitle(qus[ind])
+  }
+  
+  return(plts)
+  
 }
-lossQv <- pinlossvett(DataTEST$logprod, prQv, qus)
-lossGAUSv <- pinlossvett(DataTEST$logprod, prGAUSv, qus)
-lossLSSv <- pinlossvett(DataTEST$logprod, prLSSv, qus)
 
-plot(qus, lossQv/lossGAUSv, col = 2, ylim = c(0.7, 1.05), type = 'b')
-abline(h=1)
-lines(qus, lossLSSv/lossGAUSv, col = 3, type = 'b')
-```
-Here black is loss under Gaussian GAM, red is QGAM and green is GAULSS. The quantile GAM model is better for any quantile, and particularly good for the highest quantile.
-
-7) The GAULSS model does not capture well the residuals distribution:
-```{r dbbmi12, message = F}
-qq(fitLSS)
+plts <- compareMod(QGAM = fitMQ, GAUS = fitGAUS, GAULSS = fitLSS, dat = DataTEST, variab = "Instant")
+library(gridExtra)
+grid.arrange(grobs = plts)
 ```
 
-We fit a `shash` model, which seems to do better:
-```{r dbbmi13, message = F}
-library(mgcFam)
-fitShash <- gamV(list(logprod ~ dow + te(Posan, Instant, bs= c("cc", "cc"), k = c(5, 15)),
-                      ~ dow + te(Posan, Instant, bs= c("cc", "cc"), k = c(5, 5)), 
-                      ~ 1, 
-                      ~ 1), 
-                 family = shash, data=DataTRAIN, aViz = list(nsim = 50))
+<!-- 7) The GAULSS model does not capture well the residuals distribution: -->
+<!-- ```{r dbbmi12, message = F} -->
+<!-- qq(fitLSS) -->
+<!-- ``` -->
 
-qq(fitShash)
+<!-- We fit a `shash` model, which seems to do better: -->
+<!-- ```{r dbbmi13, message = F} -->
+<!-- library(mgcFam) -->
+<!-- fitShash <- gamV(list(logprod ~ dow + te(Posan, Instant, bs= c("cc", "cc"), k = c(5, 15)), -->
+<!--                       ~ dow + te(Posan, Instant, bs= c("cc", "cc"), k = c(5, 5)),  -->
+<!--                       ~ 1,  -->
+<!--                       ~ 1),  -->
+<!--                  family = shash, data=DataTRAIN) -->
 
-AIC(fitGAUS, fitLSS, fitShash)
-```
+<!-- qq(fitShash) -->
 
-We then include it in the comparison by predicting the quantiles under this model, and calculating the pinball loss:
-```{r dbbmi14, message = F}
-prShashv <- sapply(1:5,    
-                   function(.ii){
-                     fitShash$family$qf(qus[.ii], 
-                                        predict(fitShash, newdata = DataTEST, type = "response"),
-                                        wt = fitShash$prior.weights, 1)
-                   })
+<!-- AIC(fitGAUS, fitLSS, fitShash) -->
+<!-- ``` -->
 
-lossShashv <- pinlossvett(DataTEST$logprod, prShashv, qus)
+<!-- We then include it in the comparison: -->
+<!-- ```{r dbbmi14, message = F} -->
+<!-- pinSHv <- lapply(1:5, # shash -->
+<!--                   function(.ii){ -->
+<!--                     tmp <- getViz(fitShash, newdata = DataTEST)  -->
+<!--                     check1D(tmp, variab, type = "y",  -->
+<!--                             trans = function(x, ...){ -->
+<!--                               .pred <- predict(tmp, newdata = DataTEST, type = "response") -->
+<!--                               pinball(x, tmp$family$qf(qus[.ii], .pred, wt = .pred*0+1), qu = qus[.ii]) -->
+<!--                             })  -->
+<!--                   }) -->
 
-# Plotting relative scores
-plot(qus, lossQv/lossGAUSv, col = 2, ylim = c(0.7, 1.15), type = 'b')
-abline(h=1)
-lines(qus, lossLSSv/lossGAUSv, col = 3, type = 'b')
-lines(qus, lossShashv/lossGAUSv, col = 4, type = 'b')
-```
-`shash` does better than a normal on the top quantile but, surprisingly, it performs quite badly below the median.
+<!-- plts <- list() -->
+<!-- for(ind in 1:5){ -->
+<!-- plDat <- as.data.frame(rbind(pinQv[[ind]]$data$res, pinGAUSv[[ind]]$data$res,  -->
+<!--                              pinLSSv[[ind]]$data$res, pinSHv[[ind]]$data$res)) -->
+<!-- plDat$plotID <- as.factor(rep(c("QGAM", "GAU", "GAULSS", "SHASH"), each = nrow(plDat)/4)) -->
+
+<!-- plts[[ind]] <- ggplot(data = plDat, -->
+<!--                       mapping = aes(x = x, y = y, group = plotID, col = plotID, fill = plotID)) +  -->
+<!--               geom_smooth(se = FALSE) + theme_bw() + ggtitle(qus[ind]) -->
+<!-- } -->
+
+<!-- library(gridExtra) -->
+<!-- grid.arrange(grobs = plts) -->
+<!-- ``` -->
+<!-- `shash` does better than a normal on the top quantile but, surprisingly, it performs quite badly below the median. -->
